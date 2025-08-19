@@ -1,0 +1,13 @@
+{
+  "name": "swiftlogistics-backend",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "apps/*",
+    "infrastructure/adapters/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "start:ros": "npm --workspace infrastructure/adapters/ros-adapter run start"
+  }
+}
