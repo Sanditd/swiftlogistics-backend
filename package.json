@@ -9,5 +9,9 @@
   ],
   "scripts": {
     "start:ros": "npm --workspace infrastructure/adapters/ros-adapter run start"
+  },
+  "dependencies": {
+    "amqplib": "^0.10.8",
+    "axios": "^1.11.0"
   }
 }
