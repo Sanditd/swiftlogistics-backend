@@ -1,0 +1,51 @@
+services:
+
+  mongo:
+    image: mongo:7
+    ports: ["27017:27017"]
+    command: ["--bind_ip_all"]
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports: ["5672:5672","15672:15672"]
+
+  # ✅ Public echo server that works without auth
+  ros-vendor:
+    build: ./scripts/ros-vendor-stub
+    ports: ["5678:5678"]
+
+  wms-sim:
+    image: alpine/socat
+    command: -d -d tcp-listen:7001,fork,reuseaddr system:"cat"
+    ports: ["7001:7001"]
+
+  cms-adapter:
+    build: ./infrastructure/adapters/cms-adapter
+    ports: ["3001:3001"]
+    environment:
+      RABBIT_URL: amqp://rabbitmq
+      ORDERS_EX: orders
+      MONGO_URL: mongodb://mongo:27017/swiftlogistics
+    depends_on: [rabbitmq, mongo]
+
+  ros-adapter:
+    build: ./infrastructure/adapters/ros-adapter
+    ports: ["3002:3002"]
+    environment:
+      RABBIT_URL: amqp://rabbitmq
+      ORDERS_EX: orders
+      ROUTE_EX: routes
+      MONGO_URL: mongodb://mongo:27017/swiftlogistics
+    depends_on: [rabbitmq, mongo]
+
+  wms-adapter:
+    build: ./infrastructure/adapters/wms-adapter
+    environment:
+      - RABBIT_URL=amqp://rabbitmq:5672
+      - WMS_HOST=wms-sim
+      - WMS_PORT=7001
+    depends_on: [rabbitmq, wms-sim]
+    ports: ["3004:3004"]
+
+
+

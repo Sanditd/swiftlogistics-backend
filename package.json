@@ -8,7 +8,10 @@
     "packages/*"
   ],
   "scripts": {
-    "start:ros": "npm --workspace infrastructure/adapters/ros-adapter run start"
+   "start:cms": "npm --workspace infrastructure/adapters/cms-adapter run start",
+    "start:ros": "npm --workspace infrastructure/adapters/ros-adapter run start",
+    "start:wms": "npm --workspace infrastructure/adapters/wms-adapter run start",
+    "start:delivery": "npm --workspace apps/delivery-api run start"
   },
   "dependencies": {
     "amqplib": "^0.10.8",

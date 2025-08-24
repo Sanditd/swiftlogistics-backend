@@ -1,29 +1,40 @@
-// Simple RabbitMQ broker for ROS adapter
-
 const amqplib = require('amqplib');
 const { generateOptimisedRoute } = require('../services/rosService');
 
-const RABBITMQ_URL = 'amqp://localhost';
+const RABBIT_URL = process.env.RABBIT_URL || 'amqp://localhost';
 
 async function consumeOrderCreated() {
-  const connection = await amqplib.connect(RABBITMQ_URL);
-  const channel = await connection.createChannel();
-  await channel.assertQueue('order_created');
+  const conn = await amqplib.connect(RABBIT_URL);
+  const ch = await conn.createChannel();
 
-  channel.consume('order_created', async (msg) => {
-    if (msg !== null) {
-      const orderData = JSON.parse(msg.content.toString());
-      console.log('Received order_created:', orderData);
+  // Exchanges
+  await ch.assertExchange('orders', 'topic', { durable: true });
+  await ch.assertExchange('routes', 'topic', { durable: true });
+  await ch.assertExchange('dlx', 'topic', { durable: true });
 
-      // Call ROS (for now use dummy data)
-      const route = await generateOptimisedRoute(orderData);
+  // Queue bound to orders exchange
+  await ch.assertQueue('q.order_created', {
+    durable: true,
+    arguments: {
+      'x-dead-letter-exchange': 'dlx',
+      'x-dead-letter-routing-key': 'order_created.fail'
+    }
+  });
+  await ch.bindQueue('q.order_created', 'orders', 'order_created');
 
-      // Publish route_generated event
-      await channel.assertQueue('route_generated');
-      channel.sendToQueue('route_generated', Buffer.from(JSON.stringify(route)));
+  ch.consume('q.order_created', async (msg) => {
+    try {
+      const order = JSON.parse(msg.content.toString());
+      const route = await generateOptimisedRoute(order);
 
+      // Publish result
+      ch.publish('routes', 'route_generated', Buffer.from(JSON.stringify(route)));
       console.log('Published route_generated:', route);
-      channel.ack(msg);
+
+      ch.ack(msg);
+    } catch (e) {
+      console.error('ROS failed, sending to DLQ:', e.message);
+      ch.nack(msg, false, false); // dead-letter
     }
   });
 }
