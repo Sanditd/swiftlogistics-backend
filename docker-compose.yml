@@ -25,8 +25,7 @@ services:
     environment:
       RABBIT_URL: amqp://rabbitmq
       ORDERS_EX: orders
-      MONGO_URL: mongodb://mongo:27017/swiftlogistics
-    depends_on: [rabbitmq, mongo]
+    depends_on: [rabbitmq]
 
   ros-adapter:
     build: ./infrastructure/adapters/ros-adapter
@@ -34,18 +33,32 @@ services:
     environment:
       RABBIT_URL: amqp://rabbitmq
       ORDERS_EX: orders
-      ROUTE_EX: routes
-      MONGO_URL: mongodb://mongo:27017/swiftlogistics
-    depends_on: [rabbitmq, mongo]
+      ROUTES_EX: routes
+      VENDOR_URL: http://ros-vendor:5678/route
+      MONGO_URL: mongodb://mongo:27017
+      DB_NAME: swift
+    depends_on: [rabbitmq, mongo, ros-vendor]
 
   wms-adapter:
     build: ./infrastructure/adapters/wms-adapter
+    ports: ["3003:3003"]
     environment:
-      - RABBIT_URL=amqp://rabbitmq:5672
-      - WMS_HOST=wms-sim
-      - WMS_PORT=7001
+      RABBIT_URL: amqp://rabbitmq
+      ROUTES_EX: routes
+      WMS_HOST: wms-sim
+      WMS_PORT: 7001
     depends_on: [rabbitmq, wms-sim]
-    ports: ["3004:3004"]
 
+  
+  gateway:
+    build:
+      context: ./infrastructure/adapters/gateway
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      CMS_URL: http://cms-adapter:3001/orders
+    depends_on:
+      - cms-adapter
 
 

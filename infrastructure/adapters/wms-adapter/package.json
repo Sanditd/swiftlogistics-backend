@@ -2,19 +2,9 @@
   "name": "wms-adapter",
   "version": "1.0.0",
   "main": "index.js",
-  "scripts": {
-    "start": "node src/index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
+  "scripts": { "start": "node src/index.js" },
   "dependencies": {
     "amqplib": "^0.10.3",
-    "express": "^4.19.2",
-    "axios": "^1.7.7",
-    "mongodb": "^6.6.2"
-  
+    "express": "^4.19.2"
   }
 }

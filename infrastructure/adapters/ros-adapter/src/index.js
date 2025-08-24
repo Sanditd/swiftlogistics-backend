@@ -1,94 +1,73 @@
-// index.js – ROS Adapter: consumes orders, generates routes, saves routes, republishes
+// ROS adapter: consumes order_created, stores to Mongo, calls vendor, publishes route_generated
 const express = require('express');
 const amqp = require('amqplib');
-const { MongoClient } = require('mongodb');
+const axios = require('axios');
+const { MongoClient, ObjectId } = require('mongodb');
 
 const app = express();
-
-// ---- env ----
-const HOST        = process.env.HOST        || '0.0.0.0';
-const PORT        = Number(process.env.PORT || 3002);
-const RABBIT_URL  = process.env.RABBIT_URL  || 'amqp://rabbitmq';
-const ORDERS_EX   = process.env.ORDERS_EX   || 'orders';
-const ROUTES_EX   = process.env.ROUTE_EX    || 'routes';
-const MONGO_URL   = process.env.MONGO_URL   || 'mongodb://mongo:27017/swiftlogistics';
-
-// ---- health ----
 app.get('/health', (_req, res) => res.send('OK'));
 
-let db = null;
+const PORT = Number(process.env.PORT || 3002);
+const HOST = process.env.HOST || '0.0.0.0';
 
-app.listen(PORT, HOST, () => {
-  console.log(`ROS Adapter on http://${HOST}:${PORT}`);
-});
+const RABBIT_URL = process.env.RABBIT_URL || 'amqp://rabbitmq';
+const ORDERS_EX  = process.env.ORDERS_EX  || 'orders';
+const ROUTES_EX  = process.env.ROUTES_EX  || 'routes';
 
-(async () => {
-  // Mongo
-  try {
-    const client = new MongoClient(MONGO_URL);
-    await client.connect();
-    db = client.db();
-    console.log('✅ ROS connected to Mongo');
-  } catch (e) {
-    console.error('ROS Mongo connect failed:', e.message);
-  }
+const VENDOR_URL = process.env.VENDOR_URL || 'http://ros-vendor:5678/route';
+const MONGO_URL  = process.env.MONGO_URL  || 'mongodb://mongo:27017';
+const DB_NAME    = process.env.DB_NAME    || 'swift';
+const COLL_ORD   = process.env.COLL_ORD   || 'orders';
+const COLL_ROUTE = process.env.COLL_ROUTE || 'routes';
 
-  // Rabbit
+let ch, db, ordersC, routesC;
+
+(async function start() {
+  app.listen(PORT, HOST, () =>
+    console.log(`ROS Adapter on http://${HOST}:${PORT}`));
+
+  // mongo
+  const mcli = new MongoClient(MONGO_URL);
+  await mcli.connect();
+  db = mcli.db(DB_NAME);
+  ordersC = db.collection(COLL_ORD);
+  routesC = db.collection(COLL_ROUTE);
+
+  // rabbit
   const conn = await amqp.connect(RABBIT_URL);
-  const ch   = await conn.createChannel();
-
-  await ch.assertExchange(ORDERS_EX, 'fanout', { durable: false });
-  await ch.assertExchange(ROUTES_EX, 'fanout', { durable: false });
-
+  ch = await conn.createChannel();
+  await ch.assertExchange(ORDERS_EX, 'fanout', { durable: true });
+  await ch.assertExchange(ROUTES_EX, 'fanout', { durable: true });
   const { queue } = await ch.assertQueue('', { exclusive: true });
   await ch.bindQueue(queue, ORDERS_EX, '');
 
   ch.consume(queue, async (msg) => {
     if (!msg) return;
     const order = JSON.parse(msg.content.toString());
-    console.log('📥 got order:', order);
 
-    // fake route plan
+    // store order
+    const createdAt = new Date();
+    const { insertedId } = await ordersC.insertOne({ ...order, createdAt });
+    console.log('🧾 got order:', { ...order, createdAt, _id: insertedId });
+
+    // call vendor stub (fake routing)
+    const { data: routeData } = await axios.post(VENDOR_URL, { orderId: order.orderId });
     const route = {
       orderId: order.orderId,
-      vehicle: 'VAN-42',
-      etaMins: 25,
+      vehicle: routeData.vehicle || 'VAN-42',
+      etaMins: Number(routeData.etaMins || 25),
       createdAt: new Date()
     };
-
-    // persist route
-    try {
-      if (!db) throw new Error('Mongo not ready');
-      await db.collection('routes').insertOne(route);
-    } catch (e) {
-      console.error('ROS failed to save route:', e.message);
-    }
-
-    // publish route
-    ch.publish(ROUTES_EX, '', Buffer.from(JSON.stringify(route)));
-    console.log('📦 published route_generated:', route);
+    const { insertedId: rid } = await routesC.insertOne(route);
+    const payload = Buffer.from(JSON.stringify({ ...route, _id: rid }));
+    ch.publish(ROUTES_EX, '', payload, { persistent: true });
+    console.log('🛰️  published route_generated:', { ...route, _id: rid });
 
     ch.ack(msg);
   });
 
   process.on('SIGTERM', async () => {
-    try { await ch.close(); await conn.close(); } catch {}
+    try { await ch.close(); await conn.close(); await mcli.close(); } catch {}
     process.exit(0);
   });
 })();
-
-// List recent routes
-app.get('/routes', async (req, res) => {
-  try {
-    const limit = Math.min(parseInt(req.query.limit || '20', 10), 100);
-    const items = await db
-      .collection('routes')
-      .find({})
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .toArray();
-    res.send(items);
-  } catch (e) {
-    res.status(500).send({ error: e.message });
-  }
-});

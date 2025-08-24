@@ -3,5 +3,5 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install --omit=dev
 COPY src ./src
-EXPOSE 3001
-CMD ["node", "src/index.js"]
+EXPOSE 3000
+CMD ["node","src/index.js"]

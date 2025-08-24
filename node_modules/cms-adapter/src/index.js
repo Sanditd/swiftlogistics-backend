@@ -1,82 +1,111 @@
-// index.js – CMS Adapter: persists orders, publishes to RabbitMQ, exposes read API
+// CMS adapter: JSON + SOAP façade → publishes order_created
 const express = require('express');
 const amqp = require('amqplib');
-const { MongoClient } = require('mongodb');
+const { parseStringPromise } = require('xml2js');
 
 const app = express();
-app.use(express.json());
 
-// ---- env (overridable) ----
-const HOST        = process.env.HOST        || '0.0.0.0';
-const PORT        = Number(process.env.PORT || 3001);
-const RABBIT_URL  = process.env.RABBIT_URL  || 'amqp://rabbitmq';
-const ORDERS_EX   = process.env.ORDERS_EX   || 'orders';
-const MONGO_URL   = process.env.MONGO_URL   || 'mongodb://mongo:27017/swiftlogistics';
+// parsers
+app.use(express.json()); // JSON orders
+app.use(express.text({ type: ['text/xml', 'application/xml', 'application/soap+xml'] })); // SOAP/XML
 
-// ---- health ----
+// config
+const PORT = Number(process.env.PORT || 3001);
+const HOST = process.env.HOST || '0.0.0.0';
+const RABBIT_URL = process.env.RABBIT_URL || 'amqp://rabbitmq';
+const ORDERS_EX = process.env.ORDERS_EX || 'orders';
+
+let ch;
+
+// health
 app.get('/health', (_req, res) => res.send('OK'));
 
-let db = null;
-let channel = null;
-
-async function connectMongo() {
-  const client = new MongoClient(MONGO_URL);
-  await client.connect();
-  db = client.db(); // db name from connection string
-  console.log('✅ CMS connected to Mongo');
-}
-
-async function connectRabbit() {
-  const conn = await amqp.connect(RABBIT_URL);
-  channel = await conn.createChannel();
-  await channel.assertExchange(ORDERS_EX, 'fanout', { durable: false });
-  console.log(`✅ CMS connected RabbitMQ at ${RABBIT_URL}, exchange "${ORDERS_EX}"`);
-  process.on('SIGTERM', async () => { try { await channel.close(); await conn.close(); } catch {} process.exit(0); });
-}
-
-// Create order -> save to Mongo -> publish event
+// JSON endpoint (simple façade)
 app.post('/orders', async (req, res) => {
-  const order = req.body || {};
-  order.createdAt = new Date();
-
   try {
-    if (!db) throw new Error('Mongo not ready');
-    if (!channel) throw new Error('RabbitMQ not ready');
-
-    await db.collection('orders').insertOne(order);
-
-    channel.publish(ORDERS_EX, '', Buffer.from(JSON.stringify(order)));
-    console.log('🟦 order_created published:', order);
-
-    res.status(201).send(order);
+    const order = req.body || {};
+    await publishOrder(order);
+    res.status(201).json(order);
   } catch (e) {
-    console.error('CMS save/publish failed:', e);
-    res.status(500).send({ error: e.message });
+    console.error('publish failed:', e);
+    res.status(500).json({ error: 'publish_failed' });
   }
 });
 
-// List recent orders
-app.get('/orders', async (req, res) => {
+// SOAP endpoint: /soap/orders
+// expects a SOAP body like:
+// <Envelope><Body><CreateOrder>
+//   <orderId>101</orderId><address>Colombo</address>
+//   <items><item><sku>ABC</sku><qty>2</qty></item></items>
+// </CreateOrder></Body></Envelope>
+app.post('/soap/orders', async (req, res) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit || '20', 10), 100);
-    const items = await db
-      .collection('orders')
-      .find({})
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .toArray();
-    res.send(items);
+    const xml = req.body || '';
+    const parsed = await parseStringPromise(xml, { explicitArray: false, ignoreAttrs: true });
+
+    const body =
+      parsed?.Envelope?.Body ||
+      parsed?.['soap:Envelope']?.['soap:Body'] ||
+      parsed?.['SOAP-ENV:Envelope']?.['SOAP-ENV:Body'];
+
+    const reqNode = body?.CreateOrder || body?.createOrder;
+    if (!reqNode) throw new Error('No CreateOrder in SOAP body');
+
+    const asArray = (x) => (Array.isArray(x) ? x : x ? [x] : []);
+    const itemsNode = reqNode.items?.item || reqNode.items || [];
+    const items = asArray(itemsNode).map(i => ({
+      sku: i.sku, qty: Number(i.qty)
+    }));
+
+    const order = {
+      orderId: Number(reqNode.orderId),
+      address: reqNode.address,
+      items
+    };
+
+    await publishOrder(order);
+
+    // minimal SOAP 1.1 success reply
+    const ok =
+      `<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+         <soap:Body>
+           <CreateOrderResponse><status>OK</status></CreateOrderResponse>
+         </soap:Body>
+       </soap:Envelope>`;
+    res.set('Content-Type', 'text/xml').status(200).send(ok);
   } catch (e) {
-    res.status(500).send({ error: e.message });
+    console.error('SOAP error:', e.message);
+    const fault =
+      `<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+         <soap:Body>
+           <soap:Fault><faultcode>soap:Server</faultcode><faultstring>${e.message}</faultstring></soap:Fault>
+         </soap:Body>
+       </soap:Envelope>`;
+    res.set('Content-Type', 'text/xml').status(500).send(fault);
   }
 });
 
-// Start server immediately; connect backends in background
-app.listen(PORT, HOST, () => {
-  console.log(`CMS Adapter listening on http://${HOST}:${PORT}`);
-});
+async function publishOrder(order) {
+  if (!ch) throw new Error('channel not ready');
+  const payload = Buffer.from(JSON.stringify(order));
+  ch.publish(ORDERS_EX, '', payload, { persistent: true });
+  console.log('📦 order_created published:', order);
+}
 
-(async () => {
-  try { await connectMongo(); } catch (e) { console.error('CMS Mongo connect failed:', e.message); }
-  try { await connectRabbit(); } catch (e) { console.error('CMS Rabbit connect failed:', e.message); }
+(async function start() {
+  app.listen(PORT, HOST, () =>
+    console.log(`CMS Adapter listening on http://${HOST}:${PORT}`));
+
+  // connect to RabbitMQ (with retry)
+  while (!ch) {
+    try {
+      const conn = await amqp.connect(RABBIT_URL);
+      ch = await conn.createChannel();
+      await ch.assertExchange(ORDERS_EX, 'fanout', { durable: true });
+      console.log(`✅ Connected to RabbitMQ → exchange "${ORDERS_EX}"`);
+    } catch (e) {
+      console.error('RabbitMQ not ready, retrying in 3s...', e.message);
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  }
 })();
